@@ -73,6 +73,15 @@ type Raft struct {
 	state       RaftState // Different state leads to a differet set of rules to follow
 	currentTerm int       // Latest term we have seen
 	votedFor    int       // Candidate we have voted for. -1 means nil.
+
+	debugLogEnabled bool // If true, print debug logs
+}
+
+func (rf *Raft) dlog(format string, a ...interface{}) {
+	enabled := rf.debugLogEnabled
+	if enabled {
+		log.Printf(format, a...)
+	}
 }
 
 // return currentTerm and whether this server
@@ -177,15 +186,15 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// 1. Check for common rules.
 	reverted := rf.mayRevertToFollowerLocked(args.Term)
 	if reverted {
-		log.Printf("[%d]: info: RequestVote: reverted to follower. Sender: %d\n", rf.me, args.CandidateId)
+		rf.dlog("[%d]: info: RequestVote: reverted to follower. Sender: %d", rf.me, args.CandidateId)
 	}
 
 	// 2. Withhold vote if sender's term is less than our term.
 	if rf.currentTerm > args.Term {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
-		log.Printf(
-			"[%d]: info: RequestVote: withheld vote because our term is newer. Sender: %d, Our Term: %d, Sender Term: %d\n",
+		rf.dlog(
+			"[%d]: info: RequestVote: withheld vote because our term is newer. Sender: %d, Our Term: %d, Sender Term: %d",
 			rf.me, args.CandidateId, rf.currentTerm, args.Term)
 		return
 	}
@@ -195,8 +204,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if rf.votedFor != -1 && rf.votedFor != args.CandidateId {
 		reply.Term = -1
 		reply.VoteGranted = false
-		log.Printf(
-			"[%d]: info: RequestVote: withheld vote because we already voted. Sender: %d, Our Chosen Candidate: %d\n",
+		rf.dlog(
+			"[%d]: info: RequestVote: withheld vote because we already voted. Sender: %d, Our Chosen Candidate: %d",
 			rf.me, args.CandidateId, rf.votedFor)
 		return
 	}
@@ -214,8 +223,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Reset timer since we have granted a vote to the sender.
 	rf.timeoutCond.Signal()
 
-	log.Printf(
-		"[%d]: info: RequestVote: granted vote. Sender: %d, Term: %d\n",
+	rf.dlog(
+		"[%d]: info: RequestVote: granted vote. Sender: %d, Term: %d",
 		rf.me, args.CandidateId, rf.currentTerm)
 }
 
@@ -268,7 +277,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 1. Check for common rules.
 	reverted := rf.mayRevertToFollowerLocked(args.Term)
 	if reverted {
-		log.Printf("[%d]: info: AppendEntries: reverted to follower. Sender: %d\n", rf.me, args.LeaderId)
+		rf.dlog("[%d]: info: AppendEntries: reverted to follower. Sender: %d", rf.me, args.LeaderId)
 	}
 
 	// 2. Reply false if sender's term is less than our term.
@@ -287,7 +296,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// Reset timer since we have successfully processed a heartbeat.
 	rf.timeoutCond.Signal()
 
-	log.Printf("[%d]: info: AppendEntries: processed successfully. Sender: %d\n", rf.me, args.LeaderId)
+	rf.dlog("[%d]: info: AppendEntries: processed successfully. Sender: %d", rf.me, args.LeaderId)
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -356,7 +365,7 @@ func (rf *Raft) startElection() {
 	args := RequestVoteArgs{rf.currentTerm, rf.me}
 	me := rf.me
 
-	log.Printf("[%d]: info: Election: starting. Term: %d, Index: %d\n", rf.me, rf.currentTerm, incomingIndex)
+	rf.dlog("[%d]: info: Election: starting. Term: %d, Index: %d", rf.me, rf.currentTerm, incomingIndex)
 	rf.mu.Unlock()
 
 	// 2. Send RequestVote RPCs to all other servers.
@@ -368,7 +377,7 @@ func (rf *Raft) startElection() {
 		}
 
 		go func(peerId int) {
-			log.Printf("[%d]: info: Election: requesting for vote. Peer: %d\n", me, peerId)
+			rf.dlog("[%d]: info: Election: requesting for vote. Peer: %d", me, peerId)
 
 			reply := RequestVoteReply{}
 			ok := rf.sendRequestVote(peerId, &args, &reply)
@@ -377,7 +386,7 @@ func (rf *Raft) startElection() {
 			ch <- reply
 
 			if !ok {
-				log.Printf("[%d]: error: Election: request failed. Peer: %d\n", me, peerId)
+				rf.dlog("[%d]: error: Election: request failed. Peer: %d", me, peerId)
 				return
 			}
 
@@ -387,8 +396,8 @@ func (rf *Raft) startElection() {
 			// If index mismatch, the current timer has already reset. This means we'll
 			// simply ignore the result of the elections.
 			if incomingIndex != outgoingIndex {
-				log.Printf(
-					"[%d]: info: Election: timed out. Peer: %d, Old Index: %d, New Index: %d\n",
+				rf.dlog(
+					"[%d]: info: Election: timed out. Peer: %d, Old Index: %d, New Index: %d",
 					me, peerId, incomingIndex, outgoingIndex)
 				rf.mu.Unlock()
 				return
@@ -396,8 +405,8 @@ func (rf *Raft) startElection() {
 
 			// If we have found a higher term, we revert back to being a follower.
 			if reply.Term > args.Term {
-				log.Printf(
-					"[%d]: info: Election: reply contains higher term. Peer: %d, Our Term: %d, Peer Term: %d\n",
+				rf.dlog(
+					"[%d]: info: Election: reply contains higher term. Peer: %d, Our Term: %d, Peer Term: %d",
 					me, peerId, args.Term, reply.Term)
 
 				resetToFollowerLocked()
@@ -408,6 +417,7 @@ func (rf *Raft) startElection() {
 				rf.timeoutResult = false
 				rf.mu.Unlock()
 				rf.timeoutCond.Signal()
+				return
 			}
 
 			rf.mu.Unlock()
@@ -423,7 +433,7 @@ func (rf *Raft) startElection() {
 			votes++
 		}
 		if votes > numPeers/2 {
-			log.Printf("[%d]: info: Election: stopping the count with %d votes.\n", me, votes)
+			rf.dlog("[%d]: info: Election: stopping the count with %d votes.", me, votes)
 			break
 		}
 	}
@@ -436,8 +446,8 @@ func (rf *Raft) startElection() {
 	// 	(b). We failed to secure the majority of the votes.
 	if incomingIndex != outgoingIndex ||
 		votes <= numPeers/2 {
-		log.Printf(
-			"[%d]: info: Election: failed with %d votes. Old Index: %d, New Index: %d\n",
+		rf.dlog(
+			"[%d]: info: Election: failed with %d votes. Old Index: %d, New Index: %d",
 			votes, me, incomingIndex, outgoingIndex)
 
 		resetToFollowerLocked()
@@ -445,7 +455,7 @@ func (rf *Raft) startElection() {
 		return
 	}
 
-	log.Printf("[%d]: info: Election: succeeded with %d votes.\n", me, votes)
+	rf.dlog("[%d]: info: Election: succeeded with %d votes.", me, votes)
 
 	// We have secured majority of the votes, we'll become leader now and send out heartbeats
 	rf.state = Leader
@@ -477,7 +487,7 @@ func (rf *Raft) sendHeartbeats() {
 		}
 
 		go func(peerId int) {
-			log.Printf("[%d]: info: Heartbeat: sending. Peer: %d\n", me, peerId)
+			rf.dlog("[%d]: info: Heartbeat: sending. Peer: %d", me, peerId)
 
 			reply := AppendEntriesReply{}
 			ok := rf.sendAppendEntries(peerId, &args, &reply)
@@ -486,7 +496,7 @@ func (rf *Raft) sendHeartbeats() {
 			ch <- reply
 
 			if !ok {
-				log.Printf("[%d]: error: Heartbeat: request failed. Peer: %d\n", me, peerId)
+				rf.dlog("[%d]: error: Heartbeat: request failed. Peer: %d", me, peerId)
 			}
 
 			rf.mu.Lock()
@@ -495,8 +505,8 @@ func (rf *Raft) sendHeartbeats() {
 			// If index mismatch, the current timer has already reset. This means we'll
 			// simply ignore the result of these heartbeat replies.
 			if incomingIndex != outgoingIndex {
-				log.Printf(
-					"[%d]: info: Heartbeat: timed out. Peer: %d, Old Index: %d, New Index: %d\n",
+				rf.dlog(
+					"[%d]: info: Heartbeat: timed out. Peer: %d, Old Index: %d, New Index: %d",
 					me, peerId, incomingIndex, outgoingIndex)
 				rf.mu.Unlock()
 				return
@@ -504,8 +514,8 @@ func (rf *Raft) sendHeartbeats() {
 
 			// If we have found a higher term, we revert back to being a follower.
 			if reply.Term > args.Term {
-				log.Printf(
-					"[%d]: info: Heartbeat: reply contains higher term. Peer: %d, Our Term: %d, Peer Term: %d\n",
+				rf.dlog(
+					"[%d]: info: Heartbeat: reply contains higher term. Peer: %d, Our Term: %d, Peer Term: %d",
 					me, peerId, args.Term, reply.Term)
 
 				resetToFollowerLocked()
@@ -573,13 +583,13 @@ func (rf *Raft) stateHandler() {
 		rf.timeoutIndex++
 		rf.timeoutResult = false
 
-		log.Printf("[%d]: info: Timer: starting a new one. Index: %d\n", rf.me, rf.timeoutIndex)
+		rf.dlog("[%d]: info: Timer: starting a new one. Index: %d", rf.me, rf.timeoutIndex)
 
 		go rf.timeoutHandler()
 
 		rf.timeoutCond.Wait()
 		if rf.timeoutResult {
-			log.Printf("[%d]: info: Timer: fired. Index: %d, State: %d\n", rf.me, rf.timeoutIndex, rf.state)
+			rf.dlog("[%d]: info: Timer: fired. Index: %d, State: %d", rf.me, rf.timeoutIndex, rf.state)
 			if rf.state == Follower || rf.state == Candidate {
 				rf.mu.Unlock()
 				go rf.startElection()
@@ -588,7 +598,7 @@ func (rf *Raft) stateHandler() {
 				go rf.sendHeartbeats()
 			}
 		} else {
-			log.Printf("[%d], info: Timer: reset. Index: %d\n", rf.me, rf.timeoutIndex)
+			rf.dlog("[%d], info: Timer: reset. Index: %d", rf.me, rf.timeoutIndex)
 			rf.mu.Unlock()
 		}
 	}
@@ -618,6 +628,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = Follower
 	rf.currentTerm = 0
 	rf.votedFor = -1
+
+	// Debug log enabled?
+	rf.debugLogEnabled = true
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
