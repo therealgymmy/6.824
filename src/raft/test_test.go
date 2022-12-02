@@ -942,6 +942,77 @@ func TestFigure8Unreliable2C(t *testing.T) {
 	cfg.one(rand.Int()%10000, servers, true)
 
 	cfg.end()
+
+	//
+	// jimmy debug: custom test
+	// TODO: to be removed
+	//
+
+	// servers := 5
+	// cfg := make_config(t, servers, true, false)
+	// defer cfg.cleanup()
+
+	// cfg.begin("Test (2C): Figure 8 (unreliable)")
+
+	// command := 1
+	// cfg.one(command, 1, true)
+	// command++
+
+	// log.Printf("jimmy debug: we have consensus. starting tests")
+
+	// nup := servers
+	// for iters := 0; iters < 1000; iters++ {
+	// 	if iters == 200 {
+	// 		cfg.setlongreordering(true)
+	// 	}
+	// 	leader := -1
+	// 	for i := 0; i < servers; i++ {
+	// 		_, _, ok := cfg.rafts[i].Start(command)
+	// 		if ok {
+	// 			command++
+	// 		}
+	// 		if ok && cfg.connected[i] {
+	// 			leader = i
+	// 		}
+	// 	}
+
+	// 	if (rand.Int() % 1000) < 100 {
+	// 		ms := rand.Int63() % (int64(RaftElectionTimeout/time.Millisecond) / 2)
+	// 		time.Sleep(time.Duration(ms) * time.Millisecond)
+	// 	} else {
+	// 		ms := (rand.Int63() % 13)
+	// 		time.Sleep(time.Duration(ms) * time.Millisecond)
+	// 	}
+
+	// 	if leader != -1 && (rand.Int()%1000) < int(RaftElectionTimeout/time.Millisecond)/2 {
+	// 		cfg.disconnect(leader)
+	// 		nup -= 1
+	// 	}
+
+	// 	if nup < 3 {
+	// 		s := rand.Int() % servers
+	// 		if cfg.connected[s] == false {
+	// 			cfg.connect(s)
+	// 			nup += 1
+	// 		}
+	// 	}
+	// }
+
+	// for i := 0; i < servers; i++ {
+	// 	if cfg.connected[i] == false {
+	// 		cfg.connect(i)
+	// 	}
+	// }
+
+	// log.Printf("jimmy debug: reconnected all servers. checking consensus on command: %d", command)
+	// cfg.one(command, servers, true)
+	// log.Printf("jimmy debug: reestablished consensus on command: %d. test finished.", command)
+	// for i := 0; i < servers; i++ {
+	// 	log.Printf("jimmy debug: dumping logs for server: %d.", i)
+	// 	cfg.rafts[i].DumpLog()
+	// }
+
+	// cfg.end()
 }
 
 func internalChurn(t *testing.T, unreliable bool) {

@@ -19,13 +19,16 @@ package raft
 
 import (
 	//	"bytes"
+	"bytes"
 	"log"
 	"math/rand"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	//	"6.824/labgob"
+	"6.824/labgob"
 	"6.824/labrpc"
 )
 
@@ -95,7 +98,7 @@ type Raft struct {
 func (rf *Raft) dlog(format string, a ...interface{}) {
 	enabled := rf.debugLogEnabled
 	if enabled {
-		log.Printf(format, a...)
+		log.Printf("debug: "+format, a...)
 	}
 }
 
@@ -110,38 +113,60 @@ func (rf *Raft) GetState() (int, bool) {
 	return term, isLeader
 }
 
+// This is not locked! User must ensure lock is held before calling this function
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
 func (rf *Raft) persist() {
-	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
+
+	rf.dlog(
+		"[%d]: info: persisted states. Term: %d, VotedFor: %d, Log Len: %d",
+		rf.me, rf.currentTerm, rf.votedFor, len(rf.log))
 }
 
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	if data == nil || len(data) < 1 { // bootstrap without any state?
+		rf.dlog("[%d]: info: skip recovery since no recovery data", rf.me)
 		return
 	}
-	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+
+	var currentTerm int
+	var votedFor int
+	var log []LogEntry
+
+	if d.Decode(&currentTerm) != nil {
+		rf.dlog("[%d]: error: failed to recover currentTerm", rf.me)
+	}
+	if d.Decode(&votedFor) != nil {
+		rf.dlog("[%d]: error: failed to recover votedFor", rf.me)
+	}
+	if d.Decode(&log) != nil {
+		rf.dlog("[%d]: error: failed to recover log", rf.me)
+	}
+
+	rf.currentTerm = currentTerm
+	rf.votedFor = votedFor
+	rf.log = log
+
+	rf.dlog(
+		"[%d]: info: recovered states. Term: %d, VotedFor: %d, Log Len: %d",
+		rf.me, rf.currentTerm, rf.votedFor, len(rf.log))
 }
 
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
@@ -174,6 +199,9 @@ func (rf *Raft) mayRevertToFollowerLocked(senderCurrentTerm int) bool {
 	rf.currentTerm = senderCurrentTerm
 	rf.votedFor = -1
 	rf.state = Follower
+
+	rf.persist()
+
 	return true
 }
 
@@ -216,8 +244,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 
-	// 3. Grant vote if votedFor is null or candidateId, and candidate's log is at least
-	//    as up-to-date as our log.
+	// 3. Withhold vote if we already voted for someone else
 	if rf.votedFor != -1 && rf.votedFor != args.CandidateId {
 		reply.Term = -1
 		reply.VoteGranted = false
@@ -254,6 +281,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// 5. Set ourselves to follower and acknowledge the sender as our leader.
 	rf.votedFor = args.CandidateId
 	rf.state = Follower
+
+	rf.persist()
 
 	reply.Term = -1
 	reply.VoteGranted = true
@@ -380,6 +409,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//    Only after this, our log can be synced with the leader's log.
 	rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
 
+	rf.persist()
+
 	// From this point onwards, this request will succeed
 	reply.Success = true
 	reply.Term = -1
@@ -452,8 +483,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.log = append(rf.log, LogEntry{rf.currentTerm, index, command})
 
 	rf.dlog(
-		"[%d]: info: Start: received new entry. Index: %d, Term: %d",
-		rf.me, index, rf.currentTerm)
+		"[%d]: info: Start: received new entry. Index: %d, Term: %d, Command: %v",
+		rf.me, index, rf.currentTerm, command)
+
+	rf.persist()
 	return index, rf.currentTerm, true
 }
 
@@ -477,11 +510,6 @@ func (rf *Raft) killed() bool {
 }
 
 func (rf *Raft) startElection() {
-	resetToFollowerLocked := func() {
-		rf.state = Follower
-		rf.votedFor = -1
-	}
-
 	// 1. Prepare for election.
 	//   - Increment our current term.
 	//   - Vote for ourselves.
@@ -498,6 +526,9 @@ func (rf *Raft) startElection() {
 	me := rf.me
 
 	rf.dlog("[%d]: info: Election: starting. Term: %d, Timer Round: %d", rf.me, rf.currentTerm, incomingIndex)
+
+	rf.persist()
+
 	rf.mu.Unlock()
 
 	// 2. Send RequestVote RPCs to all other servers.
@@ -537,14 +568,16 @@ func (rf *Raft) startElection() {
 
 			// If we have found a higher term, we revert back to being a follower.
 			if reply.Term > args.Term {
-				resetToFollowerLocked()
-
 				rf.dlog(
 					"[%d]: info: Election: reverted to follower because reply contains higher term. "+
 						"Peer: %d, Our Term: %d, Peer Term: %d",
 					me, peerId, args.Term, reply.Term)
 
+				rf.state = Follower
+				rf.votedFor = -1
 				rf.currentTerm = args.Term
+
+				rf.persist()
 
 				// We also need to reset the election timer
 				rf.timeoutResult = false
@@ -583,7 +616,12 @@ func (rf *Raft) startElection() {
 			"[%d]: info: Election: failed with %d votes. Old Timer Round: %d, New Timer Round: %d",
 			me, votes, incomingIndex, outgoingIndex)
 
-		resetToFollowerLocked()
+		// Reverting back to follower since election failed.
+		rf.state = Follower
+		rf.votedFor = -1
+
+		rf.persist()
+
 		rf.mu.Unlock()
 		return
 	}
@@ -593,7 +631,7 @@ func (rf *Raft) startElection() {
 	// We have secured majority of the votes, we'll become leader now and send out heartbeats
 	rf.state = Leader
 	for i := 0; i < len(rf.peers); i++ {
-		rf.nextIndex[i] = rf.log[len(rf.log)-1].Index + 1
+		rf.nextIndex[i] = len(rf.log)
 		rf.matchIndex[i] = 0
 	}
 
@@ -601,15 +639,56 @@ func (rf *Raft) startElection() {
 	rf.timeoutResult = false
 	rf.mu.Unlock()
 	rf.timeoutCond.Signal()
+	go rf.commitLogEntries()
 	go rf.sendHeartbeats()
 }
 
-func (rf *Raft) sendHeartbeats() {
-	resetToFollowerLocked := func() {
-		rf.state = Follower
-		rf.votedFor = -1
-	}
+func (rf *Raft) commitLogEntries() {
+	for !rf.killed() {
+		rf.mu.Lock()
 
+		// We're no longer leader:
+		if rf.state != Leader {
+			rf.mu.Unlock()
+			return
+		}
+
+		indexMap := make(map[int]int)
+		for i := 0; i < len(rf.peers); i++ {
+			if rf.me == i {
+				continue
+			}
+
+			if rf.commitIndex < rf.matchIndex[i] {
+				indexMap[rf.matchIndex[i]]++
+			}
+		}
+
+		var indices []int
+		for k := range indexMap {
+			indices = append(indices, k)
+		}
+		sort.Slice(indices, func(i, j int) bool { return indices[i] > indices[j] })
+
+		for _, k := range indices {
+			if indexMap[k]+1 > len(rf.peers)/2 && rf.log[k].Term == rf.currentTerm {
+				oldIndex := rf.commitIndex
+				rf.commitIndex = k
+				rf.dlog("[%d]: catching up from old commit: %d to new commit: %d", rf.me, oldIndex, rf.commitIndex)
+				for i := oldIndex + 1; i <= rf.commitIndex; i++ {
+					rf.dlog("[%d]: applying command: %v \n", rf.me, rf.log[i])
+					rf.applyCh <- ApplyMsg{Command: rf.log[i].Command, CommandValid: true, CommandIndex: rf.log[i].Index}
+				}
+			}
+		}
+
+		// Catch up on the log every 100ms or so
+		rf.mu.Unlock()
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func (rf *Raft) sendHeartbeats() {
 	rf.mu.Lock()
 	incomingIndex := rf.timeoutIndex
 	numPeers := len(rf.peers)
@@ -624,6 +703,7 @@ func (rf *Raft) sendHeartbeats() {
 
 		go func(peerId int) {
 			rf.mu.Lock()
+			replicationEndIndex := len(rf.log) - 1
 			prevLogIndex := rf.nextIndex[peerId] - 1
 			prevLogEntry := rf.log[prevLogIndex]
 			args := AppendEntriesArgs{
@@ -633,11 +713,11 @@ func (rf *Raft) sendHeartbeats() {
 				prevLogEntry.Term,
 				rf.log[prevLogIndex+1 : len(rf.log)],
 				rf.commitIndex}
-			rf.mu.Unlock()
 
 			rf.dlog(
-				"[%d]: info: Heartbeat: sending. Peer: %d, PrevLogIndex: %d, PrevLogTerm: %d, Entries: %d",
-				me, peerId, prevLogIndex, prevLogEntry.Term, len(args.Entries))
+				"[%d]: info: Heartbeat: sending. Peer: %d, PrevLogIndex: %d, PrevLogTerm: %d, Entries: %d, Log Len: %d",
+				me, peerId, prevLogIndex, prevLogEntry.Term, len(args.Entries), len(rf.log))
+			rf.mu.Unlock()
 
 			reply := AppendEntriesReply{}
 			ok := rf.sendAppendEntries(peerId, &args, &reply)
@@ -667,9 +747,11 @@ func (rf *Raft) sendHeartbeats() {
 						"Peer: %d, Our Term: %d, Peer Term: %d",
 					me, peerId, args.Term, reply.Term)
 
-				resetToFollowerLocked()
-
+				rf.state = Follower
+				rf.votedFor = -1
 				rf.currentTerm = args.Term
+
+				rf.persist()
 
 				// We also need to reset the timer
 				rf.timeoutResult = false
@@ -698,25 +780,25 @@ func (rf *Raft) sendHeartbeats() {
 
 			// Heart beat succeeded. We now adjust log entries mapping. We may choose to advance our commit
 			// index if an entry has been replicated to the majority of the peers.
-			replicationEndIndex := len(rf.log) - 1
 			rf.matchIndex[peerId] = replicationEndIndex
 			rf.nextIndex[peerId] = replicationEndIndex + 1
 
-			if replicationEndIndex > rf.commitIndex {
-				replicated := 1
-				for j := 0; j < len(rf.matchIndex); j++ {
-					if me == j {
-						continue
-					}
-					if replicationEndIndex <= rf.matchIndex[j] && rf.currentTerm == rf.log[replicationEndIndex].Term {
-						replicated++
-					}
-				}
+			// TODO
+			// if replicationEndIndex > rf.commitIndex {
+			// 	replicated := 1
+			// 	for j := 0; j < len(rf.matchIndex); j++ {
+			// 		if me == j {
+			// 			continue
+			// 		}
+			// 		if replicationEndIndex <= rf.matchIndex[j] && rf.currentTerm == rf.log[replicationEndIndex].Term {
+			// 			replicated++
+			// 		}
+			// 	}
 
-				if replicated > len(rf.peers)/2 && rf.currentTerm == rf.log[replicationEndIndex].Term {
-					rf.commitIndex = replicationEndIndex
-				}
-			}
+			// 	if replicated > len(rf.peers)/2 && rf.currentTerm == rf.log[replicationEndIndex].Term {
+			// 		rf.commitIndex = replicationEndIndex
+			// 	}
+			// }
 
 			rf.dlog(
 				"[%d]: info: Heartbeat: succeeded. Peer: %d, Our Commit Index: %d, Our Term: %d",
@@ -725,24 +807,25 @@ func (rf *Raft) sendHeartbeats() {
 		}(i)
 	}
 
-	// Apply logs to state machine to catch up to commit index
-	rf.mu.Lock()
-	applied := 0
-	for rf.lastApplied < rf.commitIndex {
-		rf.lastApplied++
+	// TODO
+	// // Apply logs to state machine to catch up to commit index
+	// rf.mu.Lock()
+	// applied := 0
+	// for rf.lastApplied < rf.commitIndex {
+	// 	rf.lastApplied++
 
-		entry := rf.log[rf.lastApplied]
-		msg := ApplyMsg{}
-		msg.CommandValid = true
-		msg.CommandIndex = entry.Index
-		msg.Command = entry.Command
+	// 	entry := rf.log[rf.lastApplied]
+	// 	msg := ApplyMsg{}
+	// 	msg.CommandValid = true
+	// 	msg.CommandIndex = entry.Index
+	// 	msg.Command = entry.Command
 
-		rf.applyCh <- msg
+	// 	rf.applyCh <- msg
 
-		applied++
-	}
-	rf.dlog("[%d]: info: Heartbeat: applied %d committed entries.", me, applied)
-	rf.mu.Unlock()
+	// 	applied++
+	// }
+	// rf.dlog("[%d]: info: Heartbeat: applied %d committed entries.", me, applied)
+	// rf.mu.Unlock()
 }
 
 func (rf *Raft) timeoutHandler() {
@@ -806,6 +889,13 @@ func (rf *Raft) stateHandler() {
 			rf.mu.Unlock()
 		}
 	}
+}
+
+func (rf *Raft) DumpLog() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	rf.dlog("%v", rf.log)
 }
 
 // the service or tester wants to create a Raft server. the ports
